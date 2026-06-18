@@ -1,299 +1,36 @@
-import { speakText,stopSpeaking, startBrowserListening } from "./utils/speech";
-import { startRecording, stopRecording } from "./speech/recorder";
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
 
-const API_BASE = "http://127.0.0.1:8000";
+import AuthPanel from "./components/AuthPanel";
+import DashboardPanel from "./components/DashboardPanel";
+import InterviewPanel from "./components/InterviewPanel";
 
 function App() {
-  const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [sessionId, setSessionId] = useState("");
-  const [history, setHistory] = useState([]);
-  const [feedback, setFeedback] = useState("");
-  const [isListening, setIsListening] = useState(false);
-  const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [mode, setMode] = useState("DSA");
-  const [isRecording, setIsRecording] = useState(false);
-  const [speechMode, setSpeechMode] = useState("whisper");
-  const historyEndRef = useRef(null);
+  const [token, setToken] = useState(localStorage.getItem("token") || "");
 
-  useEffect(() => {
-    historyEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [history]);
-
-  const startInterview = async () => {
-    try {
-      setLoading(true);
-
-      const res = await fetch(`${API_BASE}/session/start`, {
-        method: "POST",
-      });
-
-      const data = await res.json();
-
-      setQuestion(data.question);
-      setSessionId(data.session_id);
-      setAnswer("");
-      setFeedback("");
-
-      setHistory([
-        {
-          role: "interviewer",
-          text: data.question,
-        },
-      ]);
-
-      speakText(data.question, voiceEnabled);
-    } catch (error) {
-      console.error("Error starting interview:", error);
-      alert("Could not start interview.");
-    } finally {
-      setLoading(false);
-    }
+  const handleLoginSuccess = (newToken) => {
+    setToken(newToken);
   };
 
-  const submitAnswer = async () => {
-    if (!answer.trim() || !sessionId.trim()) {
-      alert("Please start the interview and type an answer.");
-      return;
-    }
-
-    const userAnswer = answer;
-
-    try {
-      setLoading(true);
-
-      const res = await fetch(`${API_BASE}/session/answer`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          session_id: sessionId,
-          transcript: userAnswer,
-          mode: mode,
-        }),
-      });
-
-      const data = await res.json();
-
-      if (data.error) {
-        alert(data.error);
-        return;
-      }
-
-      setHistory((prev) => [
-        ...prev,
-        {
-          role: "candidate",
-          text: userAnswer,
-        },
-        {
-          role: "interviewer",
-          text: data.next_question,
-        },
-      ]);
-
-      setQuestion(data.next_question);
-      speakText(data.next_question, voiceEnabled);
-      setAnswer("");
-    } catch (error) {
-      console.error("Error submitting answer:", error);
-      alert("Could not submit answer.");
-    } finally {
-      setLoading(false);
-    }
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    setToken("");
   };
 
-  const endInterview = async () => {
-    if (!sessionId.trim()) {
-      alert("No active interview session.");
-      return;
-    }
-
-    try {
-      setLoading(true);
-
-      const res = await fetch(`${API_BASE}/session/end?session_id=${sessionId}`, {
-        method: "POST",
-      });
-
-      const data = await res.json();
-
-      setFeedback(data.feedback || "No feedback received.");
-    } catch (error) {
-      console.error("Error ending interview:", error);
-      alert("Could not end interview.");
-    } finally {
-      setLoading(false);
-    }
-  };
-const startListening = () => {
-  startBrowserListening({
-    onStart: () => setIsListening(true),
-
-    onTranscript: (text) => {
-      setAnswer(text);
-    },
-
-    onEnd: () => {
-      setIsListening(false);
-    },
-
-    onError: (err) => {
-      console.error(err);
-      alert("Speech recognition failed.");
-      setIsListening(false);
-    },
-  });
-};
- 
-
- const toggleVoice = () => {
-  stopSpeaking();
-  setVoiceEnabled((prev) => !prev);
-};
-const handleStartRecording = async () => {
-  await startRecording(() => setIsRecording(true));
-};
-
-const handleStopRecording = async () => {
-  const audioBlob = await stopRecording();
-  setIsRecording(false);
-
-  if (!audioBlob) return;
-
-  try {
-    const formData = new FormData();
-    formData.append("file", audioBlob, "recording.webm");
-
-    const res = await fetch(`${API_BASE}/speech/transcribe`, {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json();
-
-    if (data.error) {
-      alert(data.error);
-      return;
-    }
-
-    setAnswer(data.text || "");
-  } catch (error) {
-    console.error("Transcription error:", error);
-    alert("Could not transcribe audio.");
-  }
-};
   return (
     <div style={styles.page}>
       <div style={styles.card}>
         <h1>Algo-glory.ai</h1>
         <p>AI Interview Practice</p>
 
-        <select
-          value={mode}
-          onChange={(e) => setMode(e.target.value)}
-          style={styles.select}
-        >
-          <option value="DSA">DSA</option>
-          <option value="OS">OS</option>
-          <option value="DBMS">DBMS</option>
-          <option value="CN">CN</option>
-          <option value="OOPs">OOPs</option>
-        </select>
+        <AuthPanel
+          token={token}
+          onLoginSuccess={handleLoginSuccess}
+          onLogout={handleLogout}
+        />
 
-        <select
-          value={speechMode}
-          onChange={(e) => setSpeechMode(e.target.value)}
-          style={styles.select}
-        >
-          <option value="whisper">Whisper STT</option>
-          <option value="browser">Browser STT</option>
-        </select>
+        <DashboardPanel token={token} />
 
-        <button onClick={toggleVoice} style={styles.button}>
-          {voiceEnabled ? "🔊 Voice On" : "🔇 Voice Off"}
-        </button>
-
-        <button onClick={startInterview} style={styles.button} disabled={loading}>
-          {loading ? "Loading..." : "Start Interview"}
-        </button>
-
-        {question && (
-          <>
-            <div style={styles.historyBox}>
-              <h3>Interview Conversation</h3>
-
-              {history.map((item, index) => (
-                <div
-                  key={index}
-                  style={{
-                    ...styles.message,
-                    backgroundColor:
-                      item.role === "interviewer" ? "#eef4ff" : "#f3f4f6",
-                  }}
-                >
-                  <strong>
-                    {item.role === "interviewer" ? "Interviewer: " : "You: "}
-                  </strong>
-                  {item.text}
-                </div>
-              ))}
-
-              <div ref={historyEndRef}></div>
-            </div>
-
-            <textarea
-              style={styles.textarea}
-              rows="6"
-              placeholder="Type your answer here..."
-              value={answer}
-              onChange={(e) => setAnswer(e.target.value)}
-            />
-                          {speechMode === "browser" ? (
-              <button
-                onClick={startListening}
-                style={styles.button}
-                disabled={loading || isListening}
-              >
-                {isListening ? "Listening..." : "🎤 Speak Answer"}
-              </button>
-            ) : (
-              !isRecording ? (
-                <button
-                  onClick={handleStartRecording}
-                  style={styles.button}
-                  disabled={loading}
-                >
-                  🎤 Start Recording
-                </button>
-              ) : (
-                <button
-                  onClick={handleStopRecording}
-                  style={styles.button}
-                >
-                  ⏹ Stop Recording
-                </button>
-              )
-            )}
-            <button onClick={submitAnswer} style={styles.button} disabled={loading}>
-              {loading ? "Submitting..." : "Submit Answer"}
-            </button>
-
-            <button onClick={endInterview} style={styles.button} disabled={loading}>
-              {loading ? "Ending..." : "End Interview"}
-            </button>
-          </>
-        )}
-
-        {feedback && (
-          <div style={styles.feedbackBox}>
-            <h3>Interview Feedback</h3>
-            <pre style={styles.feedbackText}>{feedback}</pre>
-          </div>
-        )}
+        <InterviewPanel token={token} />
       </div>
     </div>
   );
@@ -304,82 +41,18 @@ const styles = {
     minHeight: "100vh",
     display: "flex",
     justifyContent: "center",
-    alignItems: "center",
+    alignItems: "flex-start",
     background: "#f4f6f8",
     padding: "20px",
   },
 
   card: {
     width: "100%",
-    maxWidth: "700px",
+    maxWidth: "800px",
     background: "#fff",
     padding: "30px",
     borderRadius: "12px",
     boxShadow: "0 4px 20px rgba(0,0,0,0.1)",
-  },
-
-  select: {
-    marginTop: "10px",
-    padding: "10px",
-    fontSize: "16px",
-    borderRadius: "8px",
-    border: "1px solid #ccc",
-    width: "100%",
-    boxSizing: "border-box",
-  },
-
-  historyBox: {
-    marginTop: "20px",
-    padding: "15px",
-    background: "#ffffff",
-    borderRadius: "8px",
-    border: "1px solid #ddd",
-    maxHeight: "350px",
-    overflowY: "auto",
-  },
-
-  message: {
-    padding: "10px",
-    marginBottom: "10px",
-    borderRadius: "8px",
-    lineHeight: "1.5",
-  },
-
-  textarea: {
-    width: "100%",
-    marginTop: "20px",
-    padding: "12px",
-    fontSize: "16px",
-    borderRadius: "8px",
-    border: "1px solid #ccc",
-    resize: "vertical",
-    boxSizing: "border-box",
-  },
-
-  button: {
-    marginTop: "20px",
-    padding: "12px 18px",
-    fontSize: "16px",
-    borderRadius: "8px",
-    border: "none",
-    background: "#2563eb",
-    color: "white",
-    cursor: "pointer",
-    width: "100%",
-  },
-
-  feedbackBox: {
-    marginTop: "20px",
-    padding: "15px",
-    background: "#fefce8",
-    borderRadius: "8px",
-    border: "1px solid #e5e7eb",
-  },
-
-  feedbackText: {
-    whiteSpace: "pre-wrap",
-    fontFamily: "inherit",
-    lineHeight: "1.6",
   },
 };
 
