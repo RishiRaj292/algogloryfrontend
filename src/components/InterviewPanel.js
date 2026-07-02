@@ -1,6 +1,10 @@
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { speakText, stopSpeaking, startBrowserListening } from "../utils/speech";
+import {
+  playInterviewerAudio,
+  stopInterviewerAudio,
+} from "../utils/interviewerAudio";
 import { startRecording, stopRecording } from "../speech/recorder";
 
 import {
@@ -11,26 +15,46 @@ import {
 
 const API_BASE = "http://127.0.0.1:8000";
 
-function InterviewPanel({ token }) {
+function InterviewPanel({ token, onInterviewCompleted }) {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
+
   const [sessionId, setSessionId] = useState("");
   const [history, setHistory] = useState([]);
-  const [feedback, setFeedback] = useState("");
+
+  // Kept temporarily even though App now owns the final report screen.
+  // It helps this component know whether an interview has been completed.
   const [analytics, setAnalytics] = useState(null);
 
   const [isListening, setIsListening] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
+
   const [mode, setMode] = useState("DSA");
   const [isRecording, setIsRecording] = useState(false);
   const [speechMode, setSpeechMode] = useState("whisper");
 
   const historyEndRef = useRef(null);
 
+  const hasActiveInterview = Boolean(sessionId);
+  const hasCompletedInterview = Boolean(analytics);
+
   useEffect(() => {
     historyEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [history]);
+
+  const speakInterviewerQuestion = async (questionText) => {
+    if (!voiceEnabled) {
+      return;
+    }
+
+    try {
+      await playInterviewerAudio(questionText, token);
+    } catch (error) {
+      // Backup only. If backend TTS fails, interview must still continue.
+      speakText(questionText, true);
+    }
+  };
 
   const startInterview = async () => {
     if (!token) {
@@ -49,7 +73,6 @@ function InterviewPanel({ token }) {
       setQuestion(data.question);
       setSessionId(data.session_id);
       setAnswer("");
-      setFeedback("");
       setAnalytics(null);
 
       setHistory([
@@ -59,7 +82,7 @@ function InterviewPanel({ token }) {
         },
       ]);
 
-      speakText(data.question, voiceEnabled);
+      speakInterviewerQuestion(data.question);
     } catch (error) {
       console.error("Error starting interview:", error);
       alert(error.message || "Could not start interview.");
@@ -70,7 +93,7 @@ function InterviewPanel({ token }) {
 
   const submitAnswer = async () => {
     if (!answer.trim() || !sessionId.trim()) {
-      alert("Please start the interview and type an answer.");
+      alert("Please start the interview and provide an answer.");
       return;
     }
 
@@ -79,7 +102,7 @@ function InterviewPanel({ token }) {
       return;
     }
 
-    const userAnswer = answer;
+    const userAnswer = answer.trim();
 
     try {
       setLoading(true);
@@ -91,8 +114,8 @@ function InterviewPanel({ token }) {
         mode,
       });
 
-      setHistory((prev) => [
-        ...prev,
+      setHistory((previousHistory) => [
+        ...previousHistory,
         {
           role: "candidate",
           text: userAnswer,
@@ -104,8 +127,9 @@ function InterviewPanel({ token }) {
       ]);
 
       setQuestion(data.next_question);
-      speakText(data.next_question, voiceEnabled);
       setAnswer("");
+
+      speakInterviewerQuestion(data.next_question);
     } catch (error) {
       console.error("Error submitting answer:", error);
       alert(error.message || "Could not submit answer.");
@@ -127,15 +151,33 @@ function InterviewPanel({ token }) {
 
     try {
       setLoading(true);
-
+      stopSpeaking();
+      stopInterviewerAudio();
       const data = await endInterviewApi({
         token,
         sessionId,
       });
 
-      setFeedback(data.feedback || "No feedback received.");
-      setAnalytics(data.analytics || null);
+      const completedAnalytics = data.analytics || null;
+
+      /*
+        Important flow:
+
+        1. Backend returns analytics from /session/end.
+        2. InterviewPanel sends that analytics upward to App.
+        3. App saves it in latestReport.
+        4. App switches activeScreen to "report".
+      */
+      setAnalytics(completedAnalytics);
+
       setSessionId("");
+      setIsListening(false);
+      setIsRecording(false);
+
+      onInterviewCompleted({
+        analytics: completedAnalytics,
+        mode,
+      });
     } catch (error) {
       console.error("Error ending interview:", error);
       alert(error.message || "Could not end interview.");
@@ -156,8 +198,8 @@ function InterviewPanel({ token }) {
         setIsListening(false);
       },
 
-      onError: (err) => {
-        console.error(err);
+      onError: (errorMessage) => {
+        console.error(errorMessage);
         alert("Speech recognition failed.");
         setIsListening(false);
       },
@@ -166,266 +208,316 @@ function InterviewPanel({ token }) {
 
   const toggleVoice = () => {
     stopSpeaking();
-    setVoiceEnabled((prev) => !prev);
+    stopInterviewerAudio();
+
+    setVoiceEnabled((previousValue) => !previousValue);
   };
 
   const handleStartRecording = async () => {
-    await startRecording(() => setIsRecording(true));
+    try {
+      await startRecording(() => setIsRecording(true));
+    } catch (error) {
+      console.error("Recording error:", error);
+      alert("Could not access your microphone.");
+    }
   };
 
   const handleStopRecording = async () => {
     const audioBlob = await stopRecording();
     setIsRecording(false);
 
-    if (!audioBlob) return;
+    if (!audioBlob) {
+      return;
+    }
 
     try {
+      setLoading(true);
+
       const formData = new FormData();
       formData.append("file", audioBlob, "recording.webm");
 
-      const res = await fetch(`${API_BASE}/speech/transcribe`, {
+      const response = await fetch(`${API_BASE}/speech/transcribe`, {
         method: "POST",
         body: formData,
       });
 
-      const data = await res.json();
+      const data = await response.json();
 
-      if (data.error) {
-        alert(data.error);
-        return;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not transcribe audio.");
       }
 
       setAnswer(data.text || "");
     } catch (error) {
       console.error("Transcription error:", error);
-      alert("Could not transcribe audio.");
+      alert(error.message || "Could not transcribe audio.");
+    } finally {
+      setLoading(false);
     }
   };
 
+  const resetForNewInterview = () => {
+    stopSpeaking();
+
+    setQuestion("");
+    setAnswer("");
+    setSessionId("");
+    setHistory([]);
+    setAnalytics(null);
+
+    setIsListening(false);
+    setIsRecording(false);
+  };
+
   return (
-    <div style={styles.panel}>
-      <div style={styles.sectionTitle}>
-        <h3>Start Practice Interview</h3>
-        <p>Select a topic and begin a protected AI interview session.</p>
-      </div>
+    <div className="interview-panel">
+      {!hasActiveInterview && !hasCompletedInterview && (
+        <section className="interview-setup-card">
+          <div className="interview-setup-header">
+            <div>
+              <p className="interview-kicker">START A PRACTICE SESSION</p>
 
-      <select
-        value={mode}
-        onChange={(e) => setMode(e.target.value)}
-        style={styles.select}
-      >
-        <option value="DSA">DSA</option>
-        <option value="OS">OS</option>
-        <option value="DBMS">DBMS</option>
-        <option value="CN">CN</option>
-        <option value="OOPs">OOPs</option>
-        <option value="HR">HR</option>
-        <option value="System Design">System Design</option>
-      </select>
+              <h3>Set up your interview</h3>
 
-      <select
-        value={speechMode}
-        onChange={(e) => setSpeechMode(e.target.value)}
-        style={styles.select}
-      >
-        <option value="whisper">Whisper STT</option>
-        <option value="browser">Browser STT</option>
-      </select>
+              <p>
+                Pick a topic and answer naturally. AlgoGlory will ask
+                follow-up questions based on your responses.
+              </p>
+            </div>
 
-      <button onClick={toggleVoice} style={styles.button}>
-        {voiceEnabled ? "🔊 Voice On" : "🔇 Voice Off"}
-      </button>
-
-      <button onClick={startInterview} style={styles.button} disabled={loading}>
-        {loading ? "Loading..." : "Start Interview"}
-      </button>
-
-      {question && (
-        <>
-          <div style={styles.historyBox}>
-            <h3>Interview Conversation</h3>
-
-            {history.map((item, index) => (
-              <div
-                key={index}
-                style={{
-                  ...styles.message,
-                  backgroundColor:
-                    item.role === "interviewer" ? "#eef4ff" : "#f3f4f6",
-                }}
-              >
-                <strong>
-                  {item.role === "interviewer" ? "Interviewer: " : "You: "}
-                </strong>
-                {item.text}
-              </div>
-            ))}
-
-            <div ref={historyEndRef}></div>
+            <button
+              type="button"
+              className={
+                voiceEnabled
+                  ? "voice-toggle voice-toggle-active"
+                  : "voice-toggle"
+              }
+              onClick={toggleVoice}
+            >
+              {voiceEnabled ? "🔊 Voice on" : "🔇 Voice off"}
+            </button>
           </div>
 
-          <textarea
-            style={styles.textarea}
-            rows="6"
-            placeholder="Type your answer here..."
-            value={answer}
-            onChange={(e) => setAnswer(e.target.value)}
-          />
+          <div className="interview-setup-grid">
+            <label className="field-group">
+              <span>Interview topic</span>
 
-          {speechMode === "browser" ? (
-            <button
-              onClick={startListening}
-              style={styles.button}
-              disabled={loading || isListening}
-            >
-              {isListening ? "Listening..." : "🎤 Speak Answer"}
-            </button>
-          ) : !isRecording ? (
-            <button
-              onClick={handleStartRecording}
-              style={styles.button}
-              disabled={loading}
-            >
-              🎤 Start Recording
-            </button>
-          ) : (
-            <button onClick={handleStopRecording} style={styles.button}>
-              ⏹ Stop Recording
-            </button>
-          )}
+              <select
+                value={mode}
+                onChange={(event) => setMode(event.target.value)}
+              >
+                <option value="DSA">DSA</option>
+                <option value="OS">Operating Systems</option>
+                <option value="DBMS">DBMS</option>
+                <option value="CN">Computer Networks</option>
+                <option value="OOPs">OOPs</option>
+                <option value="HR">HR / Behavioral</option>
+                <option value="System Design">System Design</option>
+              </select>
+            </label>
 
-          <button onClick={submitAnswer} style={styles.button} disabled={loading}>
-            {loading ? "Submitting..." : "Submit Answer"}
+            <label className="field-group">
+              <span>Answer input</span>
+
+              <select
+                value={speechMode}
+                onChange={(event) => setSpeechMode(event.target.value)}
+              >
+                <option value="whisper">
+                  Record with Whisper transcription
+                </option>
+                <option value="browser">
+                  Use browser speech recognition
+                </option>
+              </select>
+            </label>
+          </div>
+
+          <button
+            type="button"
+            className="start-interview-button"
+            onClick={startInterview}
+            disabled={loading}
+          >
+            {loading ? "Preparing interview..." : `Start ${mode} interview →`}
           </button>
-
-          <button onClick={endInterview} style={styles.button} disabled={loading}>
-            {loading ? "Ending..." : "End Interview"}
-          </button>
-        </>
+        </section>
       )}
 
-      {analytics && (
-        <div style={styles.analyticsBox}>
-          <h3>Structured Analytics</h3>
+      {hasActiveInterview && (
+        <section className="interview-room">
+          <header className="interview-room-header">
+            <div>
+              <p className="interview-kicker">LIVE PRACTICE SESSION</p>
 
-          <p>
-            <strong>Overall Score:</strong> {analytics.overall_score}/10
+              <h3>{mode} interview</h3>
+
+              <p>
+                Answer clearly, give examples, and treat this like a real
+                technical interview.
+              </p>
+            </div>
+
+            <div className="interview-header-actions">
+              <button
+                type="button"
+                className={
+                  voiceEnabled
+                    ? "voice-toggle voice-toggle-active"
+                    : "voice-toggle"
+                }
+                onClick={toggleVoice}
+              >
+                {voiceEnabled ? "🔊 Voice on" : "🔇 Voice off"}
+              </button>
+
+              <button
+                type="button"
+                className="end-interview-button"
+                onClick={endInterview}
+                disabled={loading}
+              >
+                {loading ? "Ending..." : "End interview"}
+              </button>
+            </div>
+          </header>
+
+          <div className="conversation-card">
+            <div className="conversation-header">
+              <div>
+                <p className="conversation-title">Interview conversation</p>
+
+                <p className="conversation-subtitle">
+                  Your transcript remains visible throughout this session.
+                </p>
+              </div>
+
+              <span className="question-count">
+                {
+                  history.filter(
+                    (item) => item.role === "interviewer"
+                  ).length
+                }{" "}
+                questions
+              </span>
+            </div>
+
+            <div className="conversation-list">
+              {history.map((item, index) => (
+                <article
+                  key={index}
+                  className={
+                    item.role === "interviewer"
+                      ? "chat-message interviewer-message"
+                      : "chat-message candidate-message"
+                  }
+                >
+                  <p className="message-role">
+                    {item.role === "interviewer"
+                      ? "AlgoGlory Interviewer"
+                      : "You"}
+                  </p>
+
+                  <p className="message-text">{item.text}</p>
+                </article>
+              ))}
+
+              <div ref={historyEndRef} />
+            </div>
+          </div>
+
+          <section className="answer-card">
+            <div className="answer-card-header">
+              <div>
+                <h4>Your answer</h4>
+
+                <p>
+                  Type your answer, or use your selected voice input method.
+                </p>
+              </div>
+
+              <span className="answer-count">
+                {answer.length} characters
+              </span>
+            </div>
+
+            <textarea
+              rows="7"
+              placeholder="Start explaining your answer here..."
+              value={answer}
+              onChange={(event) => setAnswer(event.target.value)}
+              disabled={loading}
+            />
+
+            <div className="answer-actions">
+              {speechMode === "browser" ? (
+                <button
+                  type="button"
+                  className={
+                    isListening
+                      ? "recording-button recording-button-active"
+                      : "recording-button"
+                  }
+                  onClick={startListening}
+                  disabled={loading || isListening}
+                >
+                  {isListening ? "● Listening..." : "🎤 Speak answer"}
+                </button>
+              ) : !isRecording ? (
+                <button
+                  type="button"
+                  className="recording-button"
+                  onClick={handleStartRecording}
+                  disabled={loading}
+                >
+                  🎤 Record answer
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="recording-button recording-button-active"
+                  onClick={handleStopRecording}
+                  disabled={loading}
+                >
+                  ■ Stop and transcribe
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="submit-answer-button"
+                onClick={submitAnswer}
+                disabled={loading || !answer.trim()}
+              >
+                {loading ? "Processing..." : "Submit answer →"}
+              </button>
+            </div>
+          </section>
+        </section>
+      )}
+
+      {/* This should normally disappear quickly because App switches to Report. */}
+      {hasCompletedInterview && (
+        <section className="completion-card">
+          <p className="interview-kicker">INTERVIEW COMPLETE</p>
+
+          <h3>Nice work. Your report is ready.</h3>
+
+          <p className="completion-summary">
+            Redirecting you to your detailed interview report.
           </p>
 
-          <h4>Strengths</h4>
-          <ul>
-            {(analytics.strengths || []).map((item, index) => (
-              <li key={index}>{item}</li>
-            ))}
-          </ul>
-
-          <h4>Weaknesses</h4>
-          <ul>
-            {(analytics.weaknesses || []).map((item, index) => (
-              <li key={index}>{item}</li>
-            ))}
-          </ul>
-
-          <h4>Recommendations</h4>
-          <ul>
-            {(analytics.recommendations || []).map((item, index) => (
-              <li key={index}>{item}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {feedback && (
-        <div style={styles.feedbackBox}>
-          <h3>Raw Interview Feedback</h3>
-          <pre style={styles.feedbackText}>{feedback}</pre>
-        </div>
+          <button
+            type="button"
+            className="start-interview-button"
+            onClick={resetForNewInterview}
+          >
+            Start another interview →
+          </button>
+        </section>
       )}
     </div>
   );
 }
-
-const styles = {
-  panel: {
-    marginTop: "24px",
-  },
-
-  sectionTitle: {
-    marginTop: "24px",
-    paddingTop: "10px",
-  },
-
-  select: {
-    marginTop: "10px",
-    padding: "10px",
-    fontSize: "16px",
-    borderRadius: "8px",
-    border: "1px solid #ccc",
-    width: "100%",
-    boxSizing: "border-box",
-  },
-
-  historyBox: {
-    marginTop: "20px",
-    padding: "15px",
-    background: "#ffffff",
-    borderRadius: "8px",
-    border: "1px solid #ddd",
-    maxHeight: "350px",
-    overflowY: "auto",
-  },
-
-  message: {
-    padding: "10px",
-    marginBottom: "10px",
-    borderRadius: "8px",
-    lineHeight: "1.5",
-  },
-
-  textarea: {
-    width: "100%",
-    marginTop: "20px",
-    padding: "12px",
-    fontSize: "16px",
-    borderRadius: "8px",
-    border: "1px solid #ccc",
-    resize: "vertical",
-    boxSizing: "border-box",
-  },
-
-  button: {
-    marginTop: "20px",
-    padding: "12px 18px",
-    fontSize: "16px",
-    borderRadius: "8px",
-    border: "none",
-    background: "#2563eb",
-    color: "white",
-    cursor: "pointer",
-    width: "100%",
-  },
-
-  analyticsBox: {
-    marginTop: "20px",
-    padding: "15px",
-    background: "#f0fdf4",
-    borderRadius: "8px",
-    border: "1px solid #bbf7d0",
-  },
-
-  feedbackBox: {
-    marginTop: "20px",
-    padding: "15px",
-    background: "#fefce8",
-    borderRadius: "8px",
-    border: "1px solid #e5e7eb",
-  },
-
-  feedbackText: {
-    whiteSpace: "pre-wrap",
-    fontFamily: "inherit",
-    lineHeight: "1.6",
-  },
-};
 
 export default InterviewPanel;
