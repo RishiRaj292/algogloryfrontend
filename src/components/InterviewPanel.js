@@ -1,19 +1,48 @@
 import { useEffect, useRef, useState } from "react";
 
-import { speakText, stopSpeaking, startBrowserListening } from "../utils/speech";
+import {
+  speakText,
+  stopSpeaking,
+  startBrowserListening,
+} from "../utils/speech";
+
 import {
   playInterviewerAudio,
   stopInterviewerAudio,
 } from "../utils/interviewerAudio";
+
 import { startRecording, stopRecording } from "../speech/recorder";
+
+import API_BASE from "../api/client";
 
 import {
   startInterviewApi,
+  getActiveInterviewApi,
   submitAnswerApi,
   endInterviewApi,
 } from "../api/interviewApi";
 
-const API_BASE = "http://127.0.0.1:8000";
+function convertDbHistoryToChatHistory(dbHistory = []) {
+  const chatHistory = [];
+
+  for (const turn of dbHistory) {
+    if (turn.question) {
+      chatHistory.push({
+        role: "interviewer",
+        text: turn.question,
+      });
+    }
+
+    if (turn.answer) {
+      chatHistory.push({
+        role: "candidate",
+        text: turn.answer,
+      });
+    }
+  }
+
+  return chatHistory;
+}
 
 function InterviewPanel({ token, onInterviewCompleted }) {
   const [question, setQuestion] = useState("");
@@ -23,8 +52,6 @@ function InterviewPanel({ token, onInterviewCompleted }) {
   const [sessionId, setSessionId] = useState("");
   const [history, setHistory] = useState([]);
 
-  // Kept temporarily even though App now owns the final report screen.
-  // It helps this component know whether an interview has been completed.
   const [analytics, setAnalytics] = useState(null);
 
   const [isListening, setIsListening] = useState(false);
@@ -34,24 +61,73 @@ function InterviewPanel({ token, onInterviewCompleted }) {
   const [isRecording, setIsRecording] = useState(false);
   const [speechMode, setSpeechMode] = useState("whisper");
 
+  // Prevents the setup screen from flashing briefly
+  // before we check whether PostgreSQL has an unfinished interview.
+  const [checkingActiveSession, setCheckingActiveSession] = useState(true);
+
   const historyEndRef = useRef(null);
 
   const hasActiveInterview = Boolean(sessionId);
   const hasCompletedInterview = Boolean(analytics);
 
   useEffect(() => {
-    historyEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    historyEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+    });
   }, [history]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const restoreActiveInterview = async () => {
+      if (!token) {
+        setCheckingActiveSession(false);
+        return;
+      }
+
+      try {
+        setCheckingActiveSession(true);
+
+        const data = await getActiveInterviewApi(token);
+
+        if (cancelled || !data.active) {
+          return;
+        }
+
+        setSessionId(String(data.session_id));
+        setMode(data.mode || "DSA");
+        setQuestion(data.question || "");
+
+        setHistory(
+          convertDbHistoryToChatHistory(data.history || [])
+        );
+
+        setAnalytics(null);
+      } catch (error) {
+        console.error("Could not restore active interview:", error);
+      } finally {
+        if (!cancelled) {
+          setCheckingActiveSession(false);
+        }
+      }
+    };
+
+    restoreActiveInterview();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
   const speakInterviewerQuestion = async (questionText) => {
-    if (!voiceEnabled) {
+    if (!voiceEnabled || !questionText?.trim()) {
       return;
     }
 
     try {
       await playInterviewerAudio(questionText, token);
     } catch (error) {
-      // Backup only. If backend TTS fails, interview must still continue.
+      // Backup only. Interview should still work if backend TTS fails.
       speakText(questionText, true);
     }
   };
@@ -70,19 +146,30 @@ function InterviewPanel({ token, onInterviewCompleted }) {
         mode,
       });
 
-      setQuestion(data.question);
-      setSessionId(data.session_id);
+      // Backend may return a fresh interview OR an unfinished one.
+      // Both use the same restore logic.
+      setSessionId(String(data.session_id));
+      setMode(data.mode || mode);
+      setQuestion(data.question || "");
       setAnswer("");
       setAnalytics(null);
 
-      setHistory([
-        {
-          role: "interviewer",
-          text: data.question,
-        },
-      ]);
+      setHistory(
+        convertDbHistoryToChatHistory(
+          data.history || [
+            {
+              question: data.question,
+              answer: null,
+            },
+          ]
+        )
+      );
 
-      speakInterviewerQuestion(data.question);
+      // Do not replay the entire current question automatically
+      // when backend is resuming an existing interview.
+      if (!data.resumed) {
+        speakInterviewerQuestion(data.question);
+      }
     } catch (error) {
       console.error("Error starting interview:", error);
       alert(error.message || "Could not start interview.");
@@ -151,8 +238,10 @@ function InterviewPanel({ token, onInterviewCompleted }) {
 
     try {
       setLoading(true);
+
       stopSpeaking();
       stopInterviewerAudio();
+
       const data = await endInterviewApi({
         token,
         sessionId,
@@ -160,16 +249,7 @@ function InterviewPanel({ token, onInterviewCompleted }) {
 
       const completedAnalytics = data.analytics || null;
 
-      /*
-        Important flow:
-
-        1. Backend returns analytics from /session/end.
-        2. InterviewPanel sends that analytics upward to App.
-        3. App saves it in latestReport.
-        4. App switches activeScreen to "report".
-      */
       setAnalytics(completedAnalytics);
-
       setSessionId("");
       setIsListening(false);
       setIsRecording(false);
@@ -224,6 +304,7 @@ function InterviewPanel({ token, onInterviewCompleted }) {
 
   const handleStopRecording = async () => {
     const audioBlob = await stopRecording();
+
     setIsRecording(false);
 
     if (!audioBlob) {
@@ -258,6 +339,7 @@ function InterviewPanel({ token, onInterviewCompleted }) {
 
   const resetForNewInterview = () => {
     stopSpeaking();
+    stopInterviewerAudio();
 
     setQuestion("");
     setAnswer("");
@@ -268,6 +350,22 @@ function InterviewPanel({ token, onInterviewCompleted }) {
     setIsListening(false);
     setIsRecording(false);
   };
+
+  if (checkingActiveSession) {
+    return (
+      <div className="interview-panel">
+        <section className="interview-setup-card">
+          <p className="interview-kicker">RESTORING SESSION</p>
+
+          <h3>Checking for unfinished interviews...</h3>
+
+          <p>
+            AlgoGlory is checking your saved interview progress.
+          </p>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div className="interview-panel">
@@ -326,6 +424,7 @@ function InterviewPanel({ token, onInterviewCompleted }) {
                 <option value="whisper">
                   Record with Whisper transcription
                 </option>
+
                 <option value="browser">
                   Use browser speech recognition
                 </option>
@@ -496,7 +595,6 @@ function InterviewPanel({ token, onInterviewCompleted }) {
         </section>
       )}
 
-      {/* This should normally disappear quickly because App switches to Report. */}
       {hasCompletedInterview && (
         <section className="completion-card">
           <p className="interview-kicker">INTERVIEW COMPLETE</p>

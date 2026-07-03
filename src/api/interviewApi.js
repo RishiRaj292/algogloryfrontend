@@ -18,6 +18,21 @@ export async function startInterviewApi({ token, mode }) {
   return data;
 }
 
+export async function getActiveInterviewApi(token) {
+  const response = await fetch(`${API_BASE}/session/active`, {
+    method: "GET",
+    headers: getAuthHeaders(token),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.detail || "Could not restore active interview");
+  }
+
+  return data;
+}
+
 export async function submitAnswerApi({ token, sessionId, transcript, mode }) {
   const response = await fetch(`${API_BASE}/session/answer`, {
     method: "POST",
