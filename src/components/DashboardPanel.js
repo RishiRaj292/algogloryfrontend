@@ -1,12 +1,15 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { fetchDashboardApi } from "../api/dashboardApi";
 
 function DashboardPanel({ token }) {
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const loadDashboard = async () => {
-    if (!token) return;
+  const loadDashboard = useCallback(async () => {
+    if (!token) {
+      setLoading(false);
+      return;
+    }
 
     try {
       setLoading(true);
@@ -19,13 +22,13 @@ function DashboardPanel({ token }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token]);
 
   // Whenever a valid token reaches this component,
   // automatically load the user's dashboard data.
   useEffect(() => {
     loadDashboard();
-  }, [token]);
+  }, [loadDashboard]);
 
   const averageScore = dashboard?.stats?.average_score;
 
@@ -33,6 +36,7 @@ function DashboardPanel({ token }) {
     return (
       <section className="dashboard-panel dashboard-loading-card">
         <p className="dashboard-loading-title">Loading your progress...</p>
+
         <p className="dashboard-loading-text">
           Fetching your interview analytics from AlgoGlory.
         </p>
@@ -130,7 +134,9 @@ function DashboardPanel({ token }) {
 
 function StatCard({ label, value, helper, highlight = false }) {
   return (
-    <article className={highlight ? "stat-card stat-card-highlight" : "stat-card"}>
+    <article
+      className={highlight ? "stat-card stat-card-highlight" : "stat-card"}
+    >
       <p className="stat-label">{label}</p>
       <h2 className="stat-value">{value}</h2>
       <p className="stat-helper">{helper}</p>

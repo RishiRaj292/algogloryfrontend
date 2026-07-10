@@ -45,7 +45,6 @@ function convertDbHistoryToChatHistory(dbHistory = []) {
 }
 
 function InterviewPanel({ token, onInterviewCompleted }) {
-  const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -96,7 +95,6 @@ function InterviewPanel({ token, onInterviewCompleted }) {
 
         setSessionId(String(data.session_id));
         setMode(data.mode || "DSA");
-        setQuestion(data.question || "");
 
         setHistory(
           convertDbHistoryToChatHistory(data.history || [])
@@ -150,7 +148,6 @@ function InterviewPanel({ token, onInterviewCompleted }) {
       // Both use the same restore logic.
       setSessionId(String(data.session_id));
       setMode(data.mode || mode);
-      setQuestion(data.question || "");
       setAnswer("");
       setAnalytics(null);
 
@@ -213,7 +210,6 @@ function InterviewPanel({ token, onInterviewCompleted }) {
         },
       ]);
 
-      setQuestion(data.next_question);
       setAnswer("");
 
       speakInterviewerQuestion(data.next_question);
@@ -341,7 +337,6 @@ function InterviewPanel({ token, onInterviewCompleted }) {
     stopSpeaking();
     stopInterviewerAudio();
 
-    setQuestion("");
     setAnswer("");
     setSessionId("");
     setHistory([]);
