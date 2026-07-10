@@ -1,6 +1,7 @@
-const API_BASE = "http://127.0.0.1:8000";
+import API_BASE from "../api/client";
 
 let currentAudio = null;
+let currentAudioUrl = null;
 
 export async function playInterviewerAudio(text, token) {
   if (!text?.trim()) {
@@ -10,50 +11,58 @@ export async function playInterviewerAudio(text, token) {
   try {
     stopInterviewerAudio();
 
-    const response = await fetch(`${API_BASE}/speech/interviewer-audio`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        text,
-      }),
-    });
+    const response = await fetch(
+      `${API_BASE}/speech/interviewer-audio`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          text,
+        }),
+      }
+    );
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(errorText || "Could not generate interviewer audio.");
+
+      throw new Error(
+        errorText || "Could not generate interviewer audio."
+      );
     }
 
     const audioBlob = await response.blob();
-    const audioUrl = URL.createObjectURL(audioBlob);
+    currentAudioUrl = URL.createObjectURL(audioBlob);
 
-    currentAudio = new Audio(audioUrl);
+    currentAudio = new Audio(currentAudioUrl);
 
-    currentAudio.onended = () => {
-      URL.revokeObjectURL(audioUrl);
-      currentAudio = null;
-    };
-
-    currentAudio.onerror = () => {
-      URL.revokeObjectURL(audioUrl);
-      currentAudio = null;
-    };
+    currentAudio.onended = cleanupAudio;
+    currentAudio.onerror = cleanupAudio;
 
     await currentAudio.play();
   } catch (error) {
     console.error("Interviewer TTS failed:", error);
+    cleanupAudio();
     throw error;
   }
 }
 
 export function stopInterviewerAudio() {
-  if (!currentAudio) {
-    return;
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.currentTime = 0;
   }
 
-  currentAudio.pause();
-  currentAudio.currentTime = 0;
+  cleanupAudio();
+}
+
+function cleanupAudio() {
+  if (currentAudioUrl) {
+    URL.revokeObjectURL(currentAudioUrl);
+  }
+
   currentAudio = null;
+  currentAudioUrl = null;
 }
